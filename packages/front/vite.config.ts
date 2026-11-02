@@ -1,6 +1,8 @@
 import { defineConfig } from 'vite-plus';
 
 export default defineConfig({
+  // Relative asset URLs, so the build works from a subpath such as a GitHub Pages project site.
+  base: './',
   worker: {
     format: 'es',
   },
