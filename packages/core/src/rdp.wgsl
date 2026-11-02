@@ -1,14 +1,18 @@
-// RDP rasterizer. Each invocation owns two horizontally adjacent pixels so
-// 16-bit color and Z words are never shared between invocations. A workgroup
-// covers a 16x8 tile and walks the batch's primitives in submission order.
-// Record layouts are produced by crate/src/rdp.rs.
+// RDP rasterizer. It draws into frame memory: RDRAM at SCALE times the
+// resolution, where every 16-bit halfword of RDRAM becomes SCALE x SCALE
+// samples. Sample (i, j) of the halfword at byte address a is the word
+// (a >> 1) * SCALE^2 + j * SCALE + i; its low 16 bits hold the halfword and
+// bits 16-17 the halfword's hidden 9th bits. A 32-bit pixel spans two
+// halfwords, so its samples sit in two such blocks. Each invocation owns one
+// sample, and a workgroup covers 8x8 samples and walks the batch's primitives
+// in submission order. Record layouts are produced by crate/src/rdp.rs.
 
 const STATE_WORDS: u32 = 56u;
 const PRIM_WORDS: u32 = 52u;
-const RDRAM_MASK: u32 = 0x1FFFFFu;
-// RDRAM's 9th bits follow RDRAM in the buffer, one word per RDRAM word. Each
-// 16-bit pixel of that word owns two bits, the first pixel the higher pair.
-const HIDDEN: u32 = 0x200000u;
+// Halfwords in RDRAM, minus one.
+const HALF_MASK: u32 = 0x3FFFFFu;
+
+override SCALE: u32 = 1u;
 
 const PRIM_TRI: u32 = 0u;
 const PRIM_TEXRECT: u32 = 1u;
@@ -28,7 +32,7 @@ struct Batch {
   xy1: u32,
 };
 
-@group(0) @binding(0) var<storage, read_write> rdram: array<u32>;
+@group(0) @binding(0) var<storage, read_write> fb: array<u32>;
 @group(0) @binding(1) var<storage, read> states: array<u32>;
 @group(0) @binding(2) var<storage, read> prims: array<u32>;
 @group(0) @binding(3) var<storage, read> tmem: array<u32>;
@@ -36,9 +40,10 @@ struct Batch {
 
 var<workgroup> hit: array<u32, 64>;
 
-var<private> color: array<u32, 2>;
-// The Z word holding both pixels of this invocation.
-var<private> zpair: u32;
+// The sample this invocation owns: color (16 or 32 bits), Z, and the hidden
+// bits of 16-bit color and of Z.
+var<private> color: u32;
+var<private> zword: u32;
 var<private> color_hidden: u32;
 var<private> z_hidden: u32;
 var<private> color_dirty: bool;
@@ -426,18 +431,9 @@ fn z_compress(z: u32) -> u32 {
 
 // ------------------------------------------------------------------ framebuffer
 
-fn hidden_bits(h: u32, j: u32) -> u32 {
-  return (h >> (2u - j * 2u)) & 3u;
-}
-
-fn with_hidden_bits(h: u32, j: u32, v: u32) -> u32 {
-  let sh = 2u - j * 2u;
-  return (h & ~(3u << sh)) | ((v & 3u) << sh);
-}
-
 // The memory color as the blender reads it; alpha carries the stored coverage.
-fn mem_color(j: u32, cvg: u32) -> vec4<i32> {
-  let c = color[j];
+fn mem_color(cvg: u32) -> vec4<i32> {
+  let c = color;
   if (batch.ci_size == 3u) {
     return vec4<i32>(unpack_rgba(c).rgb, i32(cvg << 5u));
   }
@@ -445,14 +441,14 @@ fn mem_color(j: u32, cvg: u32) -> vec4<i32> {
 }
 
 // Stored coverage minus one (0-7). Without image read the RDP assumes full.
-fn mem_cvg(j: u32) -> u32 {
+fn mem_cvg() -> u32 {
   if (((om_lo >> 6u) & 1u) == 0u) {
     return 7u;
   }
   if (batch.ci_size == 3u) {
-    return (color[j] >> 5u) & 7u;
+    return (color >> 5u) & 7u;
   }
-  return ((color[j] & 1u) << 2u) | hidden_bits(color_hidden, j);
+  return ((color & 1u) << 2u) | color_hidden;
 }
 
 const MAGIC_SQUARE = array<i32, 16>(0, 6, 1, 7, 4, 2, 5, 3, 3, 5, 2, 4, 7, 1, 6, 0);
@@ -491,15 +487,15 @@ fn dither(c: vec3<i32>, d: i32) -> vec3<i32> {
 
 // Writes a pixel with its coverage (0-7). 16-bit pixels keep coverage in the
 // alpha bit and the hidden bits; 32-bit pixels keep the alpha the caller gives.
-fn store_color(j: u32, c: vec4<i32>, cvg: u32) {
+fn store_color(c: vec4<i32>, cvg: u32) {
   color_dirty = true;
   let u = vec4<u32>(clamp(c, vec4<i32>(0), vec4<i32>(255)));
   if (batch.ci_size == 3u) {
-    color[j] = (u.r << 24u) | (u.g << 16u) | (u.b << 8u) | u.a;
+    color = (u.r << 24u) | (u.g << 16u) | (u.b << 8u) | u.a;
     return;
   }
-  color[j] = ((u.r >> 3u) << 11u) | ((u.g >> 3u) << 6u) | ((u.b >> 3u) << 1u) | (cvg >> 2u);
-  color_hidden = with_hidden_bits(color_hidden, j, cvg);
+  color = ((u.r >> 3u) << 11u) | ((u.g >> 3u) << 6u) | ((u.b >> 3u) << 1u) | (cvg >> 2u);
+  color_hidden = cvg & 3u;
 }
 
 // ------------------------------------------------------------------ primitives
@@ -511,6 +507,16 @@ fn attr(b: u32, comp: u32, row: u32) -> f32 {
   let sh = select(16u, 0u, (comp & 1u) == 1u);
   return f32(i32((((wi >> sh) & 0xFFFFu) << 16u) | ((wf >> sh) & 0xFFFFu)));
 }
+
+// The sample being drawn: its native pixel, its top-left corner in native
+// pixel units, and its coordinates at SCALE times the resolution.
+struct Sample {
+  x: u32,
+  y: u32,
+  pos: vec2<f32>,
+  hx: u32,
+  hy: u32,
+};
 
 struct Raster {
   covered: bool,
@@ -549,7 +555,7 @@ fn noise(x: u32, y: u32) -> i32 {
   return i32((h >> 24u) & 255u);
 }
 
-fn rasterize_triangle(base: u32, x: u32, y: u32) -> Raster {
+fn rasterize_triangle(base: u32, p: Sample) -> Raster {
   var r: Raster;
   r.covered = false;
   let raw = base + 8u;
@@ -566,28 +572,29 @@ fn rasterize_triangle(base: u32, x: u32, y: u32) -> Raster {
   let xm = f32(i32(prims[raw + 6u]));
   let dxm = f32(i32(prims[raw + 7u]));
   let ytop = yh & ~3;
+  // The RDP's 4 subscanlines and 2 columns per pixel, shrunk into the sample.
+  let step = 1.0 / f32(SCALE);
   var cvg = 0u;
   for (var sub = 0; sub < 4; sub++) {
-    let k = i32(y) * 4 + sub;
-    if (k < yh || k >= yl) {
+    let k = p.pos.y * 4.0 + f32(sub) * step;
+    if (k < f32(yh) || k >= f32(yl)) {
       continue;
     }
-    let fk = f32(k - ytop) * 0.25;
+    let fk = (k - f32(ytop)) * 0.25;
     let xhk = (xh + dxh * fk) / 65536.0;
     var xmk: f32;
-    if (k < ym) {
+    if (k < f32(ym)) {
       xmk = (xm + dxm * fk) / 65536.0;
     } else {
-      xmk = (xl + dxl * f32(k - ym) * 0.25) / 65536.0;
+      xmk = (xl + dxl * (k - f32(ym)) * 0.25) / 65536.0;
     }
     let left = select(xmk, xhk, lft);
     let right = select(xhk, xmk, lft);
-    let off = select(0.0, 0.25, (sub & 1) == 1);
-    let sx = f32(x) + off;
+    let sx = p.pos.x + select(0.0, 0.25, (sub & 1) == 1) * step;
     let first = sx >= left && sx < right;
     r.cvbit = r.cvbit || (sub == 0 && first);
     cvg += select(0u, 1u, first);
-    cvg += select(0u, 1u, sx + 0.5 >= left && sx + 0.5 < right);
+    cvg += select(0u, 1u, sx + 0.5 * step >= left && sx + 0.5 * step < right);
   }
   if (cvg == 0u) {
     return r;
@@ -596,9 +603,9 @@ fn rasterize_triangle(base: u32, x: u32, y: u32) -> Raster {
   r.cvg = cvg;
 
   let flags = (prims[base] >> 4u) & 7u;
-  let dl = f32(i32(y) - (ytop >> 2u));
-  let xh_line = (xh + dxh * f32(i32(y) * 4 - ytop) * 0.25) / 65536.0;
-  let dx = f32(x) - xh_line;
+  let dl = p.pos.y - f32(ytop >> 2u);
+  let xh_line = (xh + dxh * (p.pos.y * 4.0 - f32(ytop)) * 0.25) / 65536.0;
+  let dx = p.pos.x - xh_line;
   var block = raw + 8u;
   r.shade = vec4<i32>(0);
   if ((flags & 4u) != 0u) {
@@ -638,19 +645,20 @@ fn rasterize_triangle(base: u32, x: u32, y: u32) -> Raster {
   return r;
 }
 
-fn rasterize_rect(base: u32, x: u32, y: u32, cycle: u32) -> Raster {
+fn rasterize_rect(base: u32, p: Sample, cycle: u32) -> Raster {
   var r: Raster;
   let raw = base + 8u;
   let xl = i32(prims[raw]);
   let yl = i32(prims[raw + 1u]);
   let xh = i32(prims[raw + 2u]);
   let yh = i32(prims[raw + 3u]);
-  let px = i32(x);
-  let py = i32(y);
+  let px = i32(p.x);
+  let py = i32(p.y);
   if (cycle >= CYCLE_COPY) {
     r.covered = px >= (xh >> 2u) && px <= (xl >> 2u) && py >= (yh >> 2u) && py <= (yl >> 2u);
   } else {
-    r.covered = px * 4 >= xh && px * 4 < xl && py * 4 >= yh && py * 4 < yl;
+    let q = p.pos * 4.0;
+    r.covered = q.x >= f32(xh) && q.x < f32(xl) && q.y >= f32(yh) && q.y < f32(yl);
   }
   r.cvg = 8u;
   r.cvbit = r.covered;
@@ -658,8 +666,8 @@ fn rasterize_rect(base: u32, x: u32, y: u32, cycle: u32) -> Raster {
   r.z = (states[st + 9u] >> 16u) << 3u;
   r.dz = states[st + 9u] & 0xFFFFu;
   if ((prims[base] & 15u) == PRIM_TEXRECT) {
-    let dx = f32(px - (xh >> 2u));
-    let dy = f32(py - (yh >> 2u));
+    let dx = p.pos.x - f32(xh >> 2u);
+    let dy = p.pos.y - f32(yh >> 2u);
     let s = f32(i32(prims[raw + 4u]));
     let t = f32(i32(prims[raw + 5u]));
     var dsdx = f32(i32(prims[raw + 6u]));
@@ -687,12 +695,11 @@ struct Depth {
 
 // Hardware depth compare. The tolerance is the larger of the pixel's and the
 // stored slope, and interior pixels require being strictly in front.
-fn depth_test(j: u32, sz: u32, dzpix: u32, overflow: bool, cvg: u32) -> Depth {
+fn depth_test(sz: u32, dzpix: u32, overflow: bool, cvg: u32) -> Depth {
   var d: Depth;
   d.cvg = cvg;
-  let zword = select(zpair & 0xFFFFu, zpair >> 16u, j == 0u);
   let oz = z_decompress(zword >> 2u);
-  var dzmem = 1u << (((zword & 3u) << 2u) | hidden_bits(z_hidden, j));
+  var dzmem = 1u << (((zword & 3u) << 2u) | z_hidden);
   var coplanar = false;
   let exponent = (zword >> 13u) & 15u;
   if (exponent < 3u) {
@@ -732,9 +739,9 @@ fn depth_test(j: u32, sz: u32, dzpix: u32, overflow: bool, cvg: u32) -> Depth {
   return d;
 }
 
-fn draw(index: u32, x: u32, y: u32, j: u32) {
+fn draw(index: u32, p: Sample) {
   let base = index * PRIM_WORDS;
-  if (x < prims[base + 3u] || x >= prims[base + 5u] || y < prims[base + 4u] || y >= prims[base + 6u]) {
+  if (p.x < prims[base + 3u] || p.x >= prims[base + 5u] || p.y < prims[base + 4u] || p.y >= prims[base + 6u]) {
     return;
   }
   let header = prims[base];
@@ -751,10 +758,11 @@ fn draw(index: u32, x: u32, y: u32, j: u32) {
     }
     let fill = states[st + 4u];
     if (batch.ci_size == 3u) {
-      color[j] = fill;
+      color = fill;
     } else {
-      color[j] = select(fill & 0xFFFFu, fill >> 16u, j == 0u);
-      color_hidden = with_hidden_bits(color_hidden, j, select(0u, 3u, (color[j] & 1u) == 1u));
+      // The fill word covers two pixels, the even one in its high half.
+      color = select(fill & 0xFFFFu, fill >> 16u, (p.x & 1u) == 0u);
+      color_hidden = select(0u, 3u, (color & 1u) == 1u);
     }
     color_dirty = true;
     return;
@@ -762,9 +770,9 @@ fn draw(index: u32, x: u32, y: u32, j: u32) {
 
   var r: Raster;
   if (kind == PRIM_TRI) {
-    r = rasterize_triangle(base, x, y);
+    r = rasterize_triangle(base, p);
   } else {
-    r = rasterize_rect(base, x, y, cycle);
+    r = rasterize_rect(base, p, cycle);
   }
   if (!r.covered) {
     return;
@@ -778,7 +786,7 @@ fn draw(index: u32, x: u32, y: u32, j: u32) {
     if (alpha_compare && c.a == 0) {
       return;
     }
-    store_color(j, c, select(0u, 7u, c.a >= 128));
+    store_color(c, select(0u, 7u, c.a >= 128));
     return;
   }
 
@@ -786,7 +794,7 @@ fn draw(index: u32, x: u32, y: u32, j: u32) {
   v.prim = unpack_rgba(states[st + 7u]);
   v.env = unpack_rgba(states[st + 8u]);
   v.shade = r.shade;
-  v.noise = noise(x, y);
+  v.noise = noise(p.hx, p.hy);
   v.lod_frac = 0;
   v.prim_lod = i32(states[st + 10u] & 255u);
   v.combined = vec4<i32>(0);
@@ -811,7 +819,7 @@ fn draw(index: u32, x: u32, y: u32, j: u32) {
   if (cvg_x_alpha) {
     cvg = u32(scaled >> 5u) & 15u;
   }
-  let cdith = color_dither(x, y, v.noise);
+  let cdith = color_dither(p.hx, p.hy, v.noise);
   let adith = alpha_dither(cdith, v.noise);
   if (((om_lo >> 13u) & 1u) == 1u) {
     c.a = min(select(i32(cvg) << 5u, scaled, cvg_x_alpha), 255);
@@ -829,7 +837,7 @@ fn draw(index: u32, x: u32, y: u32, j: u32) {
 
   let aa = ((om_lo >> 3u) & 1u) == 1u;
   let force_blend = ((om_lo >> 14u) & 1u) == 1u;
-  let memcvg = mem_cvg(j);
+  let memcvg = mem_cvg();
   // Coverage overflowing a full pixel marks an interior pixel, which replaces
   // memory; partial coverage over the same surface blends as an edge.
   let overflow = ((memcvg + cvg) & 8u) != 0u;
@@ -838,7 +846,7 @@ fn draw(index: u32, x: u32, y: u32, j: u32) {
   let dzpix = select(r.dz, states[st + 9u] & 0xFFFFu, prim_depth);
   var farther = true;
   if (((om_lo >> 4u) & 1u) == 1u) {
-    let d = depth_test(j, zsrc, dzpix, overflow, cvg);
+    let d = depth_test(zsrc, dzpix, overflow, cvg);
     if (!d.ok) {
       return;
     }
@@ -850,7 +858,7 @@ fn draw(index: u32, x: u32, y: u32, j: u32) {
   }
   let blend_en = force_blend || (!overflow && aa && farther);
 
-  let mem = mem_color(j, memcvg);
+  let mem = mem_color(memcvg);
   let final_cycle = select(0u, 1u, cycle == CYCLE_2);
   var out = c.rgb;
   if (cycle == CYCLE_2) {
@@ -877,17 +885,12 @@ fn draw(index: u32, x: u32, y: u32, j: u32) {
     // Save
     default: { final_cvg = memcvg; }
   }
-  store_color(j, vec4<i32>(dither(out, cdith), i32(final_cvg << 5u)), final_cvg);
+  store_color(vec4<i32>(dither(out, cdith), i32(final_cvg << 5u)), final_cvg);
 
   if (((om_lo >> 5u) & 1u) == 1u) {
     let enc = dz_compress(dzpix);
-    let nz = ((z_compress(zsrc) << 2u) | (enc >> 2u)) & 0xFFFFu;
-    if (j == 0u) {
-      zpair = (zpair & 0xFFFFu) | (nz << 16u);
-    } else {
-      zpair = (zpair & 0xFFFF0000u) | nz;
-    }
-    z_hidden = with_hidden_bits(z_hidden, j, enc);
+    zword = ((z_compress(zsrc) << 2u) | (enc >> 2u)) & 0xFFFFu;
+    z_hidden = enc & 3u;
     z_dirty = true;
   }
 }
@@ -896,33 +899,48 @@ fn draw(index: u32, x: u32, y: u32, j: u32) {
 
 @compute @workgroup_size(8, 8)
 fn main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>, @builtin(local_invocation_index) li: u32) {
-  let bx0 = (batch.xy0 & 0xFFFFu) & ~1u;
+  let bx0 = batch.xy0 & 0xFFFFu;
   let by0 = batch.xy0 >> 16u;
   let bx1 = batch.xy1 & 0xFFFFu;
   let by1 = batch.xy1 >> 16u;
-  let tx0 = bx0 + wg.x * 16u;
-  let ty0 = by0 + wg.y * 8u;
-  let px = tx0 + lid.x * 2u;
-  let py = ty0 + lid.y;
+  // The workgroup's 8x8 samples, and the native pixels they fall in.
+  let hx0 = bx0 * SCALE + wg.x * 8u;
+  let hy0 = by0 * SCALE + wg.y * 8u;
+  let tx0 = hx0 / SCALE;
+  let ty0 = hy0 / SCALE;
+  let tx1 = (hx0 + 7u) / SCALE + 1u;
+  let ty1 = (hy0 + 7u) / SCALE + 1u;
+  var p: Sample;
+  p.hx = hx0 + lid.x;
+  p.hy = hy0 + lid.y;
+  p.x = p.hx / SCALE;
+  p.y = p.hy / SCALE;
+  p.pos = vec2<f32>(f32(p.hx), f32(p.hy)) / f32(SCALE);
   let width = batch.ci_width;
-  let in_bounds = px < width && px < bx1 && py < by1;
+  let in_bounds = p.x < width && p.x < bx1 && p.y < by1;
 
-  let pix = py * width + px;
+  let pix = p.y * width + p.x;
   let wide = batch.ci_size == 3u;
-  let caddr = select((batch.ci_addr + pix * 2u) >> 2u, (batch.ci_addr + pix * 4u) >> 2u, wide) & RDRAM_MASK;
-  let zaddr = ((batch.z_addr + pix * 2u) >> 2u) & RDRAM_MASK;
+  let sub = (p.hy % SCALE) * SCALE + p.hx % SCALE;
+  let half = (select(batch.ci_addr + pix * 2u, batch.ci_addr + pix * 4u, wide) >> 1u) & HALF_MASK;
+  let cs0 = half * SCALE * SCALE + sub;
+  // The low halfword of a 32-bit pixel.
+  let cs1 = ((half + 1u) & HALF_MASK) * SCALE * SCALE + sub;
+  let zs = (((batch.z_addr + pix * 2u) >> 1u) & HALF_MASK) * SCALE * SCALE + sub;
+  var c0 = 0u;
+  var c1 = 0u;
   if (in_bounds) {
+    c0 = fb[cs0];
     if (wide) {
-      color[0] = rdram[caddr];
-      color[1] = rdram[(caddr + 1u) & RDRAM_MASK];
+      c1 = fb[cs1];
+      color = ((c0 & 0xFFFFu) << 16u) | (c1 & 0xFFFFu);
     } else {
-      let w = rdram[caddr];
-      color[0] = w >> 16u;
-      color[1] = w & 0xFFFFu;
-      color_hidden = rdram[HIDDEN + caddr];
+      color = c0 & 0xFFFFu;
+      color_hidden = c0 >> 16u;
     }
-    zpair = rdram[zaddr];
-    z_hidden = rdram[HIDDEN + zaddr];
+    let z = fb[zs];
+    zword = z & 0xFFFFu;
+    z_hidden = z >> 16u;
   }
 
   var chunk = 0u;
@@ -934,7 +952,7 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) lid:
     var h = 0u;
     if (pi < batch.count) {
       let base = (batch.first + pi) * PRIM_WORDS;
-      let overlap = prims[base + 3u] < tx0 + 16u && prims[base + 5u] > tx0 && prims[base + 4u] < ty0 + 8u && prims[base + 6u] > ty0;
+      let overlap = prims[base + 3u] < tx1 && prims[base + 5u] > tx0 && prims[base + 4u] < ty1 && prims[base + 6u] > ty0;
       h = select(0u, 1u, overlap);
     }
     hit[li] = h;
@@ -942,8 +960,7 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) lid:
     let n = min(64u, batch.count - chunk);
     for (var k = 0u; k < n; k++) {
       if (hit[k] != 0u && in_bounds) {
-        draw(batch.first + chunk + k, px, py, 0u);
-        draw(batch.first + chunk + k, px + 1u, py, 1u);
+        draw(batch.first + chunk + k, p);
       }
     }
     workgroupBarrier();
@@ -952,17 +969,14 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) lid:
 
   if (in_bounds && color_dirty) {
     if (wide) {
-      rdram[caddr] = color[0];
-      if (px + 1u < width) {
-        rdram[(caddr + 1u) & RDRAM_MASK] = color[1];
-      }
+      // 32-bit pixels leave the hidden bits as they were.
+      fb[cs0] = (c0 & ~0xFFFFu) | (color >> 16u);
+      fb[cs1] = (c1 & ~0xFFFFu) | (color & 0xFFFFu);
     } else {
-      rdram[caddr] = (color[0] << 16u) | (color[1] & 0xFFFFu);
-      rdram[HIDDEN + caddr] = color_hidden;
+      fb[cs0] = color | (color_hidden << 16u);
     }
   }
   if (in_bounds && z_dirty) {
-    rdram[zaddr] = zpair;
-    rdram[HIDDEN + zaddr] = z_hidden;
+    fb[zs] = zword | (z_hidden << 16u);
   }
 }

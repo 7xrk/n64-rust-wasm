@@ -2,7 +2,7 @@
 /** Worker entry: owns the core, the WebGPU device and the frame loop. */
 
 import wasmUrl from 'n64core/n64core.wasm?url';
-import { Core, RDRAM_SIZE, Renderer, readBE } from 'n64core';
+import { Core, RDRAM_SIZE, Renderer, readBE, SCALES } from 'n64core';
 import type { Cheat } from './cheats';
 import { Emulator, type Status, type Watch } from './emulator';
 import type { CompareOp, ValueType } from './memsearch';
@@ -57,7 +57,11 @@ const api = {
     const adapter = await navigator.gpu?.requestAdapter();
     if (!adapter) throw new Error('WebGPU is not available in this browser');
     const device = await adapter.requestDevice({
-      requiredLimits: { maxStorageBufferBindingSize: adapter.limits.maxStorageBufferBindingSize },
+      // Frame memory at the highest internal resolution needs large buffers.
+      requiredLimits: {
+        maxStorageBufferBindingSize: adapter.limits.maxStorageBufferBindingSize,
+        maxBufferSize: adapter.limits.maxBufferSize,
+      },
     });
     device.lost.then((info) => emit({ type: 'error', message: `GPU device lost: ${info.message}` }));
     device.addEventListener('uncapturederror', (e) => emit({ type: 'error', message: (e as GPUUncapturedErrorEvent).error.message }));
@@ -168,6 +172,15 @@ const api = {
 
   togglePin(frame: number) {
     return locked((e) => e.togglePin(frame));
+  },
+
+  /** Sets the internal resolution multiplier, one of SCALES. */
+  setScale(scale: number) {
+    if (!SCALES.includes(scale)) throw new Error(`Unsupported scale ${scale}`);
+    return locked((e) => {
+      e.renderer.setScale(scale);
+      e.renderer.frame(e.core);
+    });
   },
 
   setSnapshotInterval(frames: number) {

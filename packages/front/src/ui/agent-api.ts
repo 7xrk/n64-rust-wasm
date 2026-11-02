@@ -17,6 +17,7 @@ const CALLS: Partial<Record<keyof WorkerApi, string>> = {
   runFrames: '(count: number): Promise<void> // while paused; stops at the end of a played movie',
   seek: '(frame: number): Promise<void> // restores the nearest snapshot and replays the movie',
   setSpeed: '(speed: number): Promise<void> // 1 = realtime, Infinity = unlimited',
+  setScale: '(scale: 1 | 2 | 3 | 4): Promise<void> // internal resolution; not saved, unlike the settings panel',
   setInput: '(port: number, pad: Pad): Promise<void> // live input, used outside movie playback',
   reset: '(): Promise<void> // soft reset; cartridge saves survive',
   saveSlot: '(slot: number): Promise<void>',

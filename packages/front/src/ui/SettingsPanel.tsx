@@ -1,8 +1,8 @@
 /** Key / gamepad mapping and emulation settings. */
 
 import { useEffect, useState } from 'preact/hooks';
-import { BUTTONS, type ButtonId, padButtons } from 'n64core';
-import { emu, liveInput, run } from './client';
+import { BUTTONS, type ButtonId, padButtons, SCALES } from 'n64core';
+import { emu, liveInput, renderScale, run, setRenderScale } from './client';
 import { DEFAULT_MAPPING, type Mapping, saveMapping, usableGamepads } from './input';
 import { isNsoN64Gamepad, nsoError, nsoPads, requestNsoN64, webHidAvailable } from './nso-n64';
 
@@ -141,6 +141,14 @@ export function SettingsPanel() {
           >
             {[1, 2, 3, 4].map((n) => (
               <option value={n}>{n}</option>
+            ))}
+          </select>
+        </label>
+        <label>
+          Internal resolution
+          <select value={renderScale.value} onChange={(e) => setRenderScale(Number(e.currentTarget.value))}>
+            {SCALES.map((n) => (
+              <option value={n}>{n}×</option>
             ))}
           </select>
         </label>

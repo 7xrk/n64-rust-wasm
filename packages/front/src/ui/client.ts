@@ -1,6 +1,7 @@
 /** Main-thread handle to the emulation worker plus the state the UI renders. */
 
 import { effect, signal } from '@preact/signals';
+import { SCALES } from 'n64core';
 import type { Cheat } from '../emu/cheats';
 import type { Status, Watch } from '../emu/emulator';
 import type { PinInfo } from '../emu/pins';
@@ -102,6 +103,30 @@ effect(() => {
   run(emu.setWatches(list));
 });
 
+const SCALE_STORAGE = 'n64tas.scale';
+
+function loadScale(): number {
+  try {
+    const n = Number(localStorage.getItem(SCALE_STORAGE));
+    return SCALES.includes(n) ? n : 1;
+  } catch {
+    return 1;
+  }
+}
+
+/** Internal resolution multiplier, kept in this browser across sessions. */
+export const renderScale = signal(loadScale());
+
+export function setRenderScale(scale: number): void {
+  renderScale.value = scale;
+  try {
+    localStorage.setItem(SCALE_STORAGE, String(scale));
+  } catch {
+    // Persistence is a convenience; the session keeps working without it.
+  }
+  run(emu.setScale(scale));
+}
+
 let ready: Promise<void> | null = null;
 let audioStarted = false;
 
@@ -110,6 +135,7 @@ export function attachCanvas(canvas: HTMLCanvasElement): Promise<void> {
   ready ??= (async () => {
     const offscreen = canvas.transferControlToOffscreen();
     await emu.init(transfer(offscreen, [offscreen]));
+    await emu.setScale(renderScale.peek());
   })().catch((e: Error) => {
     errorMessage.value = e.message;
   });

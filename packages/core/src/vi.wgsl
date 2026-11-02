@@ -1,19 +1,21 @@
 // VI scanout in two passes: `fs_filter` applies the VI's antialiasing, dither and
-// divot filters at framebuffer resolution, `fs_present` resamples it to the output.
+// divot filters at frame memory resolution, `fs_present` resamples it to the output.
 
 struct Vi {
   origin: u32,
   width: u32,
   ctrl: u32,
   pad: u32,
+  // The scanned area in frame memory samples.
   src_size: vec2<f32>,
 };
 
-const RDRAM_MASK: u32 = 0x1FFFFFu;
-// Hidden bits follow RDRAM; see rdp.wgsl.
-const HIDDEN: u32 = 0x200000u;
+const HALF_MASK: u32 = 0x3FFFFFu;
 
-@group(0) @binding(0) var<storage, read> rdram: array<u32>;
+// Frame memory at SCALE times the resolution; its layout is described in rdp.wgsl.
+override SCALE: u32 = 1u;
+
+@group(0) @binding(0) var<storage, read> fb: array<u32>;
 @group(0) @binding(1) var<uniform> vi: Vi;
 @group(0) @binding(2) var filtered: texture_2d<f32>;
 @group(0) @binding(3) var linear_sampler: sampler;
@@ -39,19 +41,24 @@ struct Pixel {
   cvg: u32,
 };
 
+// Sample `sub` of the halfword at byte address `a`.
+fn sample(a: u32, sub: u32) -> u32 {
+  return fb[((a >> 1u) & HALF_MASK) * SCALE * SCALE + sub];
+}
+
 fn fetch(p: vec2<i32>) -> Pixel {
-  let q = clamp(p, vec2<i32>(0), vec2<i32>(i32(vi.width), i32(ceil(vi.src_size.y))) - 1);
-  let i = u32(q.y) * vi.width + u32(q.x);
+  let q = vec2<u32>(clamp(p, vec2<i32>(0), vec2<i32>(i32(vi.width * SCALE), i32(ceil(vi.src_size.y))) - 1));
+  let n = q / SCALE;
+  let sub = (q.y % SCALE) * SCALE + q.x % SCALE;
+  let i = n.y * vi.width + n.x;
   if ((vi.ctrl & 3u) == 3u) {
-    let w = rdram[((vi.origin + i * 4u) >> 2u) & RDRAM_MASK];
+    let a = vi.origin + i * 4u;
+    let w = ((sample(a, sub) & 0xFFFFu) << 16u) | (sample(a + 2u, sub) & 0xFFFFu);
     return Pixel(vec3<i32>(vec3<u32>(w >> 24u, w >> 16u, w >> 8u) & vec3<u32>(255u)), (w >> 5u) & 7u);
   }
-  let a = vi.origin + i * 2u;
-  let word = (a >> 2u) & RDRAM_MASK;
-  let second = (a & 2u) == 2u;
-  let c = select(rdram[word] >> 16u, rdram[word] & 0xFFFFu, second);
-  let hidden = (rdram[HIDDEN + word] >> select(2u, 0u, second)) & 3u;
-  return Pixel(vec3<i32>(vec3<u32>(c >> 8u, c >> 3u, c << 2u) & vec3<u32>(0xF8u)), ((c & 1u) << 2u) | hidden);
+  let s = sample(vi.origin + i * 2u, sub);
+  let c = s & 0xFFFFu;
+  return Pixel(vec3<i32>(vec3<u32>(c >> 8u, c >> 3u, c << 2u) & vec3<u32>(0xF8u)), ((c & 1u) << 2u) | ((s >> 16u) & 3u));
 }
 
 // Dither filter: each neighbor brighter or darker than the center moves it by
