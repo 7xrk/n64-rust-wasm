@@ -1,0 +1,10 @@
+[target.wasm32-unknown-unknown]
+# Features every current browser supports. They shorten sign extension,
+# float-to-int conversion, memcpy and lane loops in the interpreters.
+# The function table is exported and growable so the host can add the
+# functions of RSP blocks compiled at run time.
+rustflags = [
+  "-C", "target-feature=+simd128,+bulk-memory,+sign-ext,+nontrapping-fptoint,+mutable-globals",
+  "-C", "link-arg=--export-table",
+  "-C", "link-arg=--growable-table",
+]

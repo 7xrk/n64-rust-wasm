@@ -1,0 +1,726 @@
+:root {
+  --bg: #101114;
+  --panel: #1a1c21;
+  --line: #2c2f36;
+  --text: #e6e7ea;
+  --muted: #9aa0aa;
+  --accent: #4f9cff;
+  --danger: #ff6b6b;
+  color-scheme: dark;
+  font-family: system-ui, -apple-system, 'Hiragino Sans', sans-serif;
+  font-size: 14px;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+}
+
+/* An app, not a document: dragging and clicking must never select text. Only
+   text worth copying opts back in. */
+.app {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+  user-select: none;
+}
+
+input,
+textarea,
+.error,
+.mono,
+.chat {
+  user-select: text;
+}
+
+.app.dropping {
+  outline: 3px dashed var(--accent);
+  outline-offset: -3px;
+}
+
+.toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+}
+
+.toolbar h1 {
+  font-size: 16px;
+  margin: 0 8px 0 0;
+}
+
+button,
+.button,
+select,
+input,
+textarea {
+  font: inherit;
+  color: var(--text);
+  background: #23262d;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 6px 10px;
+}
+
+button,
+.button {
+  cursor: pointer;
+}
+
+button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+button:not(:disabled):hover,
+.button:hover {
+  border-color: var(--accent);
+}
+
+.stat {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  min-width: 72px;
+}
+
+.error {
+  margin: 8px 16px;
+  color: var(--danger);
+}
+
+.screen {
+  position: relative;
+  display: flex;
+  justify-content: center;
+  padding: 16px;
+}
+
+.screen canvas {
+  width: min(100%, 960px);
+  aspect-ratio: 4 / 3;
+  background: #000;
+}
+
+.hint {
+  position: absolute;
+  top: 50%;
+  color: var(--muted);
+}
+
+.workspace {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 588px;
+  gap: 12px;
+  padding: 12px 16px;
+  align-items: start;
+}
+
+@media (max-width: 1000px) {
+  .workspace {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.workspace .screen {
+  padding: 0;
+}
+
+.slots {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+  align-items: center;
+}
+
+.slot {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.slot button {
+  padding: 4px 6px;
+  font-size: 12px;
+}
+
+.side,
+.tools {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  display: flex;
+  flex-direction: column;
+}
+
+/* The piano roll stays in view while the left column scrolls. */
+.side {
+  position: sticky;
+  top: 12px;
+  height: calc(100vh - 90px);
+  min-height: 480px;
+}
+
+.tools {
+  margin-top: 12px;
+}
+
+.tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 8px;
+  border-bottom: 1px solid var(--line);
+}
+
+.active {
+  border-color: var(--accent) !important;
+  background: #1d3354 !important;
+}
+
+.panel {
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-height: 0;
+}
+
+.panel h3 {
+  font-size: 13px;
+  margin: 8px 0 0;
+}
+
+.panel-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+
+.muted {
+  color: var(--muted);
+}
+
+.small {
+  font-size: 12px;
+  margin: 0;
+}
+
+.mono {
+  font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+}
+
+.narrow {
+  width: 90px;
+}
+
+.check {
+  display: inline-flex;
+  gap: 4px;
+  align-items: center;
+}
+
+.grid {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 12px;
+}
+
+.grid th,
+.grid td {
+  border-bottom: 1px solid var(--line);
+  padding: 3px 4px;
+  text-align: left;
+}
+
+.grid input {
+  width: 100%;
+  padding: 2px 4px;
+}
+
+.cheat textarea {
+  width: 100%;
+}
+
+/* piano roll */
+.piano {
+  flex: 1;
+  min-height: 0;
+}
+
+.piano .roll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  outline: none;
+}
+
+.piano .roll:focus-visible {
+  border-color: var(--accent);
+}
+
+.piano .row {
+  display: flex;
+  height: 22px;
+  position: absolute;
+  left: 0;
+  right: 0;
+}
+
+.piano .row.header {
+  position: static;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.piano .row.beyond {
+  opacity: 0.55;
+}
+
+.piano .row.past {
+  background: #14261b;
+}
+
+.piano .row.lagged {
+  background: #2e1d14;
+}
+
+.piano .row.current {
+  background: #1d3354;
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
+.piano .row.selected {
+  background: #33305a;
+}
+
+.piano .cell {
+  flex: 0 0 26px;
+  height: 22px;
+  border-right: 1px solid var(--line);
+  font-size: 10px;
+  text-align: center;
+  line-height: 22px;
+  cursor: pointer;
+}
+
+.piano .cell.frame {
+  flex-basis: 64px;
+  text-align: right;
+  padding-right: 6px;
+  font-variant-numeric: tabular-nums;
+}
+
+.piano .cell.mark {
+  flex-basis: 18px;
+  color: #6fcf97;
+}
+
+.piano .row.lagged .cell.mark {
+  color: #ffb347;
+}
+
+.piano .cell.axis {
+  flex-basis: 44px;
+  font-variant-numeric: tabular-nums;
+  cursor: default;
+}
+
+.piano .cell.btn.on {
+  background: #2f6fd1;
+  color: #fff;
+}
+
+/* An off button shows its mark only under the pointer, so a click's effect is visible before it. */
+.piano .row:not(.header) .cell.btn:not(.on) {
+  color: transparent;
+}
+
+.piano .row:not(.header) .cell.btn:not(.on):hover {
+  color: var(--muted);
+}
+
+.piano .row:not(.header) .cell.mark:not(.pinned):hover {
+  font-size: 0;
+}
+
+.piano .row:not(.header) .cell.mark:not(.pinned):hover::after {
+  content: '📌';
+  font-size: 10px;
+  opacity: 0.4;
+}
+
+.pin-strip {
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+  padding-top: 6px;
+}
+
+.pin {
+  position: relative;
+  flex: none;
+}
+
+.pin-shot {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 3px;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.pin-image {
+  display: block;
+  width: 128px;
+  height: 96px;
+  background: #000;
+}
+
+.pin-image img {
+  display: block;
+}
+
+/* While the screenshot is retaken, the old one stays dimmed and a spinner takes the remove button's place. */
+.pin.rendering .pin-image img {
+  opacity: 0.35;
+}
+
+.pin-spinner {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 16px;
+  height: 16px;
+  border: 2px solid rgb(255 255 255 / 0.2);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    rotate: 360deg;
+  }
+}
+
+.pin.current .pin-shot {
+  border-color: var(--accent);
+}
+
+.pin-remove {
+  position: absolute;
+  top: 5px;
+  right: 5px;
+  padding: 0 5px;
+  font-size: 11px;
+  line-height: 16px;
+}
+
+.piano .row.header .cell {
+  cursor: default;
+}
+
+/* Row operations hang on the selection: insert sits on its top edge, delete brackets it. */
+.piano .row-insert,
+.piano .row-delete {
+  position: absolute;
+  z-index: 1;
+  padding: 0;
+  font-size: 12px;
+  line-height: 1;
+}
+
+.piano .row-insert {
+  left: 2px;
+  width: 20px;
+  height: 20px;
+  translate: 0 -50%;
+  border-radius: 50%;
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+  font-weight: bold;
+}
+
+.piano .row-delete {
+  right: 2px;
+  width: 22px;
+  border-radius: 4px;
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+.piano .row-delete:hover {
+  background: var(--danger);
+  color: #fff;
+}
+
+/* Inserting leaves the selected positions empty and pushes their inputs down. */
+.piano .row.insert {
+  background: transparent;
+  outline: 1px dashed var(--accent);
+  outline-offset: -1px;
+}
+
+.piano .row.insert .cell {
+  visibility: hidden;
+}
+
+.piano .row.delete {
+  background: #4a1f24;
+}
+
+.piano .row.delete .cell {
+  text-decoration: line-through;
+  opacity: 0.5;
+}
+
+.piano .cell.axis.previewing {
+  color: var(--accent);
+}
+
+.segmented {
+  display: inline-flex;
+}
+
+.segmented button {
+  border-radius: 0;
+}
+
+.segmented button:first-child {
+  border-radius: 6px 0 0 6px;
+}
+
+.segmented button:last-child {
+  border-radius: 0 6px 6px 0;
+}
+
+.spacer {
+  flex: 1;
+}
+
+.stick-editor {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  padding-top: 6px;
+}
+
+.stick-fields {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+
+.stick-pad {
+  flex: none;
+  touch-action: none;
+  cursor: crosshair;
+}
+
+.stick-pad.disabled {
+  cursor: default;
+}
+
+.stick-pad .ring {
+  fill: #15171c;
+  stroke: var(--line);
+  stroke-width: 2;
+}
+
+.stick-pad .axis {
+  stroke: #2a2d34;
+}
+
+.stick-pad .arm {
+  stroke: var(--accent);
+  stroke-width: 2;
+}
+
+.stick-pad .knob {
+  fill: var(--accent);
+}
+
+.stick-pad .readout {
+  fill: var(--muted);
+  font-size: 10px;
+  font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+}
+
+/* input display under the screen */
+.input-display {
+  display: flex;
+  gap: 16px;
+  align-items: center;
+  margin-top: 8px;
+  padding: 8px 12px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.input-display .stick-pad {
+  width: 72px;
+  height: 72px;
+}
+
+.input-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.input-group {
+  display: flex;
+  gap: 3px;
+}
+
+.chip {
+  min-width: 28px;
+  padding: 3px 6px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  font-size: 12px;
+  text-align: center;
+  color: var(--muted);
+}
+
+.chip.on {
+  background: #2f6fd1;
+  border-color: #2f6fd1;
+  color: #fff;
+}
+
+.input-meta {
+  margin-left: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+}
+
+.input-meta .big {
+  font-size: 22px;
+  font-variant-numeric: tabular-nums;
+}
+
+.mode-badge {
+  font-size: 12px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+}
+
+.mode-badge.record {
+  color: #ff6b6b;
+  border-color: #ff6b6b;
+}
+
+.mode-badge.play {
+  color: #6fcf97;
+  border-color: #6fcf97;
+}
+
+/* AI chat */
+.chat {
+  height: 420px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 8px;
+}
+
+.msg {
+  white-space: pre-wrap;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.msg.user {
+  align-self: flex-end;
+  background: #1d3354;
+  padding: 6px 10px;
+  border-radius: 8px;
+}
+
+.msg.tool {
+  font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.msg.error {
+  color: var(--danger);
+}
+
+.ai textarea {
+  flex: 1;
+}
+
+/* scene history picker over the screen */
+.scene-picker {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  translate: -50% 0;
+  width: min(100%, 960px);
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  background: rgb(0 0 0 / 0.55);
+}
+
+.scene-help {
+  margin: 0 12px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.scene-strip {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  padding: 8px 12px 12px;
+}
+
+.scene {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 4px;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  background: var(--panel);
+}
+
+.scene img {
+  display: block;
+  width: 160px;
+  height: 120px;
+  background: #000;
+}
+
+.scene.selected {
+  border-color: var(--accent);
+  outline: 2px solid var(--accent);
+}

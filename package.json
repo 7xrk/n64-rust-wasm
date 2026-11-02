@@ -1,0 +1,14 @@
+{
+  "name": "n64-tas-workspace",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "pnpm -F n64core build:wasm && pnpm -F n64-tas dev",
+    "build": "pnpm -r build",
+    "check": "vp check"
+  },
+  "devDependencies": {
+    "typescript": "^7.0.2",
+    "vite-plus": "^1.4.0"
+  }
+}
